@@ -406,11 +406,16 @@ with tabs[0]:
                 st.error(f"Fehler: {e}")
 
     elif src == "Bild":
-        up = st.file_uploader("Bild/Screenshot hochladen", type=["png","jpg","jpeg","webp"])
-        if up and st.button("Aus Bild (OCR) importieren"):
+        ups = st.file_uploader("Screenshots/Bilder hochladen (mehrere möglich)", type=["png","jpg","jpeg","webp"], accept_multiple_files=True)
+        if ups and st.button("Aus Bildern (OCR) importieren"):
             try:
-                data, raw = extract_from_image(up.read())
-                rid = save_recipe(data, source_type="image", source_url=None, raw_text=raw)
+                texts = []
+                for up in ups:
+                    img = Image.open(up).convert("RGB")
+                    texts.append(pytesseract.image_to_string(img, lang="deu+eng"))
+                combined_text = "".join(texts)
+                data, raw = extract_from_text(combined_text)
+                rid = save_recipe(data, source_type="image", source_url=None, raw_text=combined_text)
                 st.success(f"Gespeichert: {data.get('title') or 'Rezept'}")
             except Exception as e:
                 st.error(f"Fehler: {e}")
