@@ -1,0 +1,15 @@
+streamlit
+requests
+beautifulsoup4
+extruct
+w3lib
+trafilatura
+readability-lxml
+lxml
+pytesseract
+pillow
+pdfplumber
+pandas
+python-slugify
+sqlalchemy
+python-dateutil
