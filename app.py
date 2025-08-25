@@ -445,62 +445,106 @@ with tabs[1]:
             with cols[1]:
                 st.markdown("**Zubereitung**")
                 st.markdown("\n".join([f"{idx+1}. {s}" for idx, s in enumerate(steps)]) or "—")
-            # --- Portionen anpassen ---
+            # --- Portionen anpassen & Rezept überschreiben ---
             with st.expander("🍽️ Portionen anpassen"):
-                import re
+                import re as _re
+                UNICODE_FRACTIONS = {"¼":0.25,"½":0.5,"¾":0.75,"⅓":1/3,"⅔":2/3,"⅛":0.125,"⅜":0.375,"⅝":0.625,"⅞":0.875}
+                UNITS_ROUNDING = {
+                    # ganzzahlig
+                    "g": lambda x: round(x), "gramm": lambda x: round(x), "ml": lambda x: round(x),
+                    "stk": lambda x: round(x), "stück": lambda x: round(x),
+                    # halbe Schritte
+                    "el": lambda x: round(x*2)/2, "tl": lambda x: round(x*2)/2,
+                    "esslöffel": lambda x: round(x*2)/2, "teelöffel": lambda x: round(x*2)/2,
+                    # zwei Nachkommastellen
+                    "kg": lambda x: round(x,2), "l": lambda x: round(x,2),
+                    "tasse": lambda x: round(x*2)/2, "cup": lambda x: round(x*2)/2,
+                }
 
-                def _extract_servings_num(serv_raw):
-                    """Zahl aus '2 Portionen', 'für 4', 'Serves 3' etc. ziehen."""
-                    if not serv_raw:
-                        return None
-                    m = re.search(r"(\d+)", str(serv_raw))
-                    return float(m.group(1)) if m else None
+                def _extract_servings_num_generic(serv_raw):
+                    if not serv_raw: return None
+                    m = _re.search(r"(\d+[\.,]?\d*)", str(serv_raw))
+                    return float(m.group(1).replace(",", ".")) if m else None
 
-                def _scale_line_simple(line: str, factor: float) -> str:
-                    """
-                    Skaliert die führende Menge in einer Zutatenzeile.
-                    Unterstützt:
-                    - Dezimal: 500, 1.5, 1,5
-                    - Gemischter Bruch: 1 1/2
-                    Beispiele:
-                    '500 g Fleisch' *2 -> '1000 g Fleisch'
-                    '1,5 EL Zucker' *2 -> '3 EL Zucker'
-                    '1 1/2 TL Salz' *2 -> '3 TL Salz'
-                    """
-                    # 1) gemischter Bruch am Anfang: "1 1/2 ..."
-                    m2 = re.match(r"^\s*(\d+)\s+(\d+)/(\d+)", line)
-                    if m2:
-                        base = float(m2.group(1)) + (float(m2.group(2)) / float(m2.group(3)))
-                        new = base * factor
-                        val = (f"{new:.2f}" if new % 1 else str(int(round(new))))
-                        return re.sub(r"^\s*\d+\s+\d+/\d+", val, line, count=1)
+                def _unicode_fracs_to_float(txt):
+                    if not txt: return None
+                    m = _re.match(r"^\s*(\d+)?\s*([{}])".format("".join(UNICODE_FRACTIONS.keys())), txt)
+                    if not m: return None
+                    return (float(m.group(1)) if m.group(1) else 0.0) + UNICODE_FRACTIONS.get(m.group(2), 0)
 
-                    # 2) einfache führende Zahl: "500", "1,5", "1.5"
-                    m = re.match(r"^\s*(\d+[.,]?\d*)", line)
+                def _parse_leading_quantity(line):
+                    s = line.lstrip(); off = len(line) - len(s)
+                    # Range 2-3 / 2–3
+                    m = _re.match(r"(\d+[\.,]?\d*)\s*[\-–—]\s*(\d+[\.,]?\d*)", s)
                     if m:
-                        num_txt = m.group(1)
-                        had_comma = "," in num_txt
-                        num = float(num_txt.replace(",", "."))
-                        new = num * factor
-                        val = f"{new:.2f}".rstrip("0").rstrip(".")
-                        if had_comma:
-                            val = val.replace(".", ",")
-                        return line[:m.start(1)] + val + line[m.end(1):]
+                        a = float(m.group(1).replace(",", ".")); b = float(m.group(2).replace(",", "."))
+                        return ("range", off+m.start(0), off+m.end(0), (a,b), ("," in m.group(1)))
+                    # Gemischter Bruch 1 1/2
+                    m = _re.match(r"(\d+)\s+(\d+)/(\d+)", s)
+                    if m:
+                        val = float(m.group(1)) + float(m.group(2))/float(m.group(3))
+                        return ("single", off+m.start(0), off+m.end(0), val, False)
+                    # Unicode‑Bruch ½ / 1 ½
+                    uf = _unicode_fracs_to_float(s[:4])
+                    if uf is not None:
+                        m = _re.match(r"\s*(\d+)?\s*[{}]".format("".join(UNICODE_FRACTIONS.keys())), s)
+                        return ("single", off+m.start(0), off+m.end(0), uf, False)
+                    # Einfache Zahl
+                    m = _re.match(r"(\d+[\.,]?\d*)", s)
+                    if m:
+                        val = float(m.group(1).replace(",", ".")); had_comma = ("," in m.group(1))
+                        return ("single", off+m.start(1), off+m.end(1), val, had_comma)
+                    return None
 
-                    # 3) keine Menge erkannt -> unverändert
-                    return line
+                def _detect_unit_after(line, end_idx):
+                    tail = line[end_idx:].strip().lower()
+                    m = _re.match(r"([a-zäöüA-ZÄÖÜ]+)", tail)
+                    if not m: return None
+                    return m.group(1).replace("ä","ae").replace("ö","oe").replace("ü","ue")
 
-                base_serv = _extract_servings_num(r.servings)
+                def _format_number(value, prefer_comma):
+                    txt = (f"{value:.2f}" if abs(value-round(value))>1e-6 else str(int(round(value))))
+                    txt = txt.rstrip("0").rstrip(".")
+                    return txt.replace(".", ",") if prefer_comma else txt
+
+                def _apply_round(unit, x):
+                    func = UNITS_ROUNDING.get(unit) if unit else None
+                    return func(x) if func else x
+
+                def scale_line_smart(line, factor):
+                    m = _parse_leading_quantity(line)
+                    if not m: return line
+                    kind,start,end,val,had_comma = m
+                    unit = _detect_unit_after(line, end)
+                    if kind == "range":
+                        a,b = val
+                        a = _apply_round(unit, a*factor); b = _apply_round(unit, b*factor)
+                        return line[:start] + f"{_format_number(a,had_comma)}–{_format_number(b,had_comma)}" + line[end:]
+                    x = _apply_round(unit, val*factor)
+                    return line[:start] + _format_number(x,had_comma) + line[end:]
+
+                base_serv = _extract_servings_num_generic(r.servings)
                 default_target = int(base_serv) if base_serv else 2
                 target = st.number_input("Ziel‑Portionen", min_value=1, value=default_target, step=1)
 
                 if base_serv and target and target != base_serv:
                     factor = float(target) / float(base_serv)
-                    scaled = [_scale_line_simple(l, factor) for l in ings]
+                    scaled = [scale_line_smart(l, factor) for l in ings]
                     st.markdown("**Skalierte Zutaten**")
                     st.markdown("\n".join([f"- {i}" for i in scaled]))
+
+                    if st.button("Skalierung übernehmen (Rezept überschreiben)"):
+                        with engine.begin() as conn:
+                            conn.execute(text("UPDATE recipes SET servings=:s WHERE id=:id"),
+                                        {"s": f"{int(target)} Portionen", "id": selected})
+                            conn.execute(text("DELETE FROM ingredients WHERE recipe_id=:id"), {"id": selected})
+                            for line in scaled:
+                                conn.execute(text("INSERT INTO ingredients(id,recipe_id,line) VALUES(:id,:rid,:line)"),
+                                            {"id": str(uuid.uuid4()), "rid": selected, "line": line})
+                        st.success("Rezept aktualisiert.")
+                        st.rerun()
                 elif not base_serv:
-                    st.info("Keine Basis‑Portionsangabe gefunden. Füge sie im Rezept hinzu (z. B. '2 Portionen'), dann klappt die Skalierung.")
+                    st.info("Keine Basis‑Portionsangabe gefunden. Trage sie oben im Rezept ein (z. B. '2 Portionen'), dann klappt die Skalierung.")
             if r.source_url:
                 st.link_button("Quelle öffnen", r.source_url)
 
