@@ -11,6 +11,10 @@ from PIL import Image
 
 import io
 
+from sqlalchemy import text
+from modules.data import engine  # DB-Engine für Updates/Deletes wiederverwenden
+import uuid as _uuid
+
 
 def render():
     st.header("Kochbuch")
@@ -143,4 +147,58 @@ def render():
             with c2:
                 st.markdown("**Zubereitung**")
                 st.markdown("\n".join([f"{idx+1}. {s}" for idx, s in enumerate(steps)]) or "—")
+            # --- 📝 Bearbeiten / 🗑️ Löschen ---
+            with st.expander("📝 Bearbeiten / 🗑️ Löschen", expanded=False):
+                new_title = st.text_input("Titel", value=r.title or "")
+                new_servings = st.text_input("Portionen", value=r.servings or "")
+                new_time = st.text_input("Zeit", value=r.total_time or "")
+                ing_text = st.text_area("Zutaten (eine pro Zeile)", value="\n".join(ings), height=180)
+                step_text = st.text_area("Schritte (eine pro Zeile)", value="\n".join(steps), height=220)
+
+                col_save, col_delete = st.columns(2)
+
+                with col_save:
+                    if st.button("💾 Änderungen speichern", type="primary"):
+                        try:
+                            new_ings = [l.strip() for l in ing_text.splitlines() if l.strip()]
+                            new_steps = [l.strip() for l in step_text.splitlines() if l.strip()]
+                            with engine.begin() as conn:
+                                # Rezept-Stammdaten updaten
+                                conn.execute(
+                                    text("UPDATE recipes SET title=:t, servings=:s, total_time=:tt WHERE id=:id"),
+                                    {"t": new_title, "s": new_servings, "tt": new_time, "id": selected},
+                                )
+                                # Zutaten/Schritte ersetzen (löschen + neu einfügen)
+                                conn.execute(text("DELETE FROM ingredients WHERE recipe_id=:id"), {"id": selected})
+                                conn.execute(text("DELETE FROM steps WHERE recipe_id=:id"), {"id": selected})
+                                for line in new_ings:
+                                    conn.execute(
+                                        text("INSERT INTO ingredients(id,recipe_id,line) VALUES(:id,:rid,:line)"),
+                                        {"id": str(_uuid.uuid4()), "rid": selected, "line": line},
+                                    )
+                                for idx2, inst in enumerate(new_steps):
+                                    conn.execute(
+                                        text("INSERT INTO steps(id,recipe_id,idx,instruction) VALUES(:id,:rid,:idx,:ins)"),
+                                        {"id": str(_uuid.uuid4()), "rid": selected, "idx": idx2, "ins": inst},
+                                    )
+                            st.success("Rezept aktualisiert.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Fehler beim Speichern: {e}")
+
+                with col_delete:
+                    st.markdown("**Gefährlicher Bereich**")
+                    confirm = st.checkbox("Ich möchte dieses Rezept endgültig löschen.")
+                    if st.button("🗑️ Endgültig löschen", disabled=not confirm):
+                        try:
+                            with engine.begin() as conn:
+                                # Sicher löschen (falls ON DELETE CASCADE nicht aktiv ist)
+                                conn.execute(text("DELETE FROM ingredients WHERE recipe_id=:id"), {"id": selected})
+                                conn.execute(text("DELETE FROM steps WHERE recipe_id=:id"), {"id": selected})
+                                conn.execute(text("DELETE FROM recipes WHERE id=:id"), {"id": selected})
+                            st.success("Rezept gelöscht.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Fehler beim Löschen: {e}")
+
 
