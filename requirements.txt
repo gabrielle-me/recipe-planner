@@ -1,4 +1,6 @@
 streamlit
+pandas
+sqlalchemy
 requests
 beautifulsoup4
 extruct
@@ -9,7 +11,5 @@ lxml
 pytesseract
 pillow
 pdfplumber
-pandas
 python-slugify
-sqlalchemy
 python-dateutil
